@@ -92,6 +92,21 @@ class TaskState(TypedDict):
 #NotRequired 表示是非必须要求
 ```
 
+也可以用 Pydantic 的方式
+
+```python
+from pydantic import BaseModel, Field
+from typing import Optional
+
+class TaskState(BaseModel):
+    user_query: str = Field(description="用户原始查询")
+    tool_result: Optional[str] = Field(default=None, description="工具调用结果")
+    final_answer: Optional[str] = Field(default=None, description="最终回答")
+    progress: Optional[int] = Field(default=None, description="任务进度百分比")
+```
+
+两种写法各有优劣，目前2种写法官方都是支持的，因为Pydantic 写法学习起来有难度，本文以下教学均使用TypedDict的写法，但实际的企业生产建议是使用Pydantic 写法，更工程化一些。
+
 #### 6.2.1.2 状态传递机制
 
 LangGraph的状态传递采用“不可变更新”原则：节点接收当前状态的副本，执行逻辑后返回更新后的部分状态（无需返回完整状态），框架会自动合并为新的全局状态，再传递给下一个节点。
@@ -1062,3 +1077,571 @@ png_data = linear_graph.get_graph().draw_mermaid_png()  # 获取PNG字节流
 
 **知识点：**条件边多分支配置、循环逻辑设计、状态字段扩展（记录重生成次数）、循环终止条件控制。
 
+```python
+# ================== 依赖 ==================
+from typing import TypedDict, NotRequired
+from langgraph.graph import StateGraph, START, END
+from langchain_core.prompts import PromptTemplate
+from langgraph.checkpoint.memory import MemorySaver
+import os
+from dotenv import load_dotenv
+from langchain_openai import ChatOpenAI
+
+# ================== LLM 初始化 ==================
+load_dotenv()
+
+llm = ChatOpenAI(
+    api_key=os.getenv("API_KEY"),
+    base_url="https://api.deepseek.com",
+    model="deepseek-chat",
+    temperature=0.3
+)
+
+# ==========================================================
+# 6.4.3 分支工作流案例：带结果校验的动态文本处理
+# ==========================================================
+
+# ----------------------------------------------------------
+# 1️⃣ 状态定义：扩展工作流状态（新增循环控制字段）
+# ----------------------------------------------------------
+class BranchTextProcessState(TypedDict):
+    """分支工作流共享状态（类似共享黑板）"""
+
+    # 输入字段
+    raw_text: str
+
+    # 中间过程字段（可选）
+    deduplicated_text: NotRequired[str]
+    summary_text: NotRequired[str]
+    has_sensitive: NotRequired[bool]
+
+    # 循环控制字段
+    rewrite_count: NotRequired[int]      # 重生成次数
+    quality_valid: NotRequired[bool]     # 摘要质量是否合格
+
+    # 最终输出
+    final_output: NotRequired[str]
+
+
+# ----------------------------------------------------------
+# 2️⃣ 节点定义（工作流执行单元）
+# ----------------------------------------------------------
+
+# === 文本去重节点 ===
+def deduplicate_node(state: BranchTextProcessState):
+    raw_text = state["raw_text"]
+    lines = raw_text.split("\n")
+    seen, unique_lines = set(), []
+
+    for line in lines:
+        line = line.strip()
+        if line and line not in seen:
+            seen.add(line)
+            unique_lines.append(line)
+
+    print("✅ [Node] 去重完成")
+    return {"deduplicated_text": "\n".join(unique_lines)}
+
+
+# === 摘要生成节点 ===
+def summary_node(state: BranchTextProcessState):
+    text = state.get("deduplicated_text", "")
+    if not text:
+        return {"summary_text": "无有效文本"}
+
+    prompt = PromptTemplate(
+        input_variables=["text"],
+        template="请为以下文本生成50字以内摘要，保留核心信息：\n{text}"
+    )
+    summary = (prompt | llm).invoke({"text": text}).content
+
+    print("🤖 [Node] 摘要生成:", summary)
+    return {"summary_text": summary}
+
+
+# === 敏感词检测节点 ===
+def sensitive_check_node(state: BranchTextProcessState):
+    summary = state.get("summary_text", "")
+    sensitive_words = ["违法", "违规"]
+    has_sensitive = any(w in summary for w in sensitive_words)
+
+    print(f"🔍 [Node] 敏感词检测: {has_sensitive}")
+    return {"has_sensitive": has_sensitive}
+
+
+# === 摘要质量校验节点（教学重点） ===
+def quality_check_node(state: BranchTextProcessState):
+    summary = state.get("summary_text", "")
+
+    # 长度校验
+    length_valid = 15 <= len(summary) <= 50
+
+    # 信息完整性校验
+    core_keywords = ["LangGraph", "工作流"]
+    info_valid = all(k in summary for k in core_keywords)
+
+    quality_valid = length_valid and info_valid
+    print(f"📏 [Node] 质量校验 | 长度OK={length_valid} | 关键词OK={info_valid} | 合格={quality_valid}")
+
+    return {"quality_valid": quality_valid}
+
+
+# === 重生成次数更新节点 ===
+def update_rewrite_count_node(state: BranchTextProcessState):
+    count = state.get("rewrite_count", 0) + 1
+    print(f"🔢 [Node] 重生成次数 -> {count}")
+    return {"rewrite_count": count}
+
+
+# ----------------------------------------------------------
+# 3️⃣ Router：条件分支决策（LangGraph 核心）
+# ----------------------------------------------------------
+def rewrite_router(state: BranchTextProcessState):
+    quality = state.get("quality_valid", False)
+    count = state.get("rewrite_count", 0)
+
+    print(f"🚦 [Router] quality={quality}, rewrite_count={count}")
+
+    # 质量合格 → 输出
+    if quality:
+        return "to_output"
+
+    # 不合格且次数 < 2 → 重生成
+    if count < 2:
+        return "to_rewrite"
+
+    # 次数耗尽 → 强制输出
+    return "to_force_output"
+
+
+# ----------------------------------------------------------
+# 4️⃣ 输出节点
+# ----------------------------------------------------------
+
+# 正常输出
+def output_node(state: BranchTextProcessState):
+    summary = state.get("summary_text", "")
+    has_sensitive = state.get("has_sensitive", False)
+
+    if has_sensitive:
+        final_output = "⚠️ 检测到敏感内容，禁止输出摘要"
+    else:
+        final_output = f"""
+✅ 文本处理完成
+重生成次数: {state.get('rewrite_count', 0)}
+
+【摘要】
+{summary}
+
+【去重原文】
+{state.get('deduplicated_text')}
+"""
+
+    print("📤 [Node] 正常输出")
+    return {"final_output": final_output}
+
+
+# 强制输出
+def force_output_node(state: BranchTextProcessState):
+    summary = state.get("summary_text", "")
+    final_output = f"""
+⚠️ 摘要多次重生成仍不合格（教学示例）
+重生成次数: {state.get('rewrite_count', 0)}
+摘要长度: {len(summary)}
+
+强制输出摘要：
+{summary}
+"""
+    print("📤 [Node] 强制输出")
+    return {"final_output": final_output}
+
+
+# ----------------------------------------------------------
+# 5️⃣ 构建 LangGraph 分支工作流
+# ----------------------------------------------------------
+def build_branch_graph():
+    graph = StateGraph(BranchTextProcessState)
+
+    # 注册节点
+    graph.add_node("deduplicate", deduplicate_node)
+    graph.add_node("summary", summary_node)
+    graph.add_node("sensitive_check", sensitive_check_node)
+    graph.add_node("quality_check", quality_check_node)
+    graph.add_node("update_rewrite_count", update_rewrite_count_node)
+    graph.add_node("output", output_node)
+    graph.add_node("force_output", force_output_node)
+
+    # 固定执行路径
+    graph.add_edge(START, "deduplicate")
+    graph.add_edge("deduplicate", "summary")
+    graph.add_edge("summary", "sensitive_check")
+    graph.add_edge("sensitive_check", "quality_check")
+
+    # 条件分支（教学核心）
+    graph.add_conditional_edges(
+        "quality_check",
+        rewrite_router,
+        {
+            "to_output": "output",
+            "to_rewrite": "update_rewrite_count",
+            "to_force_output": "force_output",
+        }
+    )
+
+    # 循环回退路径
+    graph.add_edge("update_rewrite_count", "summary")
+
+    # 结束节点
+    graph.add_edge("output", END)
+    graph.add_edge("force_output", END)
+
+    return graph.compile(checkpointer=MemorySaver())
+
+
+# ----------------------------------------------------------
+# 6️⃣ 运行测试（课堂演示用）
+# ----------------------------------------------------------
+if __name__ == "__main__":
+    branch_graph = build_branch_graph()
+
+    # 初始状态
+    test_state: BranchTextProcessState = {
+        "raw_text": "LangGraph是LangChain生态下的有状态工作流框架，支持图结构建模、状态追溯、动态分支和并行执行，适用于复杂AI任务编排",
+        "rewrite_count": 0,
+    }
+
+    config = {"configurable": {"thread_id": "branch_workflow_demo"}}
+
+    print("\n🚀 启动分支工作流示例\n" + "=" * 60)
+    final_state = branch_graph.invoke(test_state, config=config)
+
+    # 输出结果
+    print("\n🎯 最终结果:")
+    print(final_state["final_output"])
+
+    print("\n📊 执行统计:")
+    print("重生成次数:", final_state.get("rewrite_count"))
+    print("质量是否合格:", final_state.get("quality_valid"))
+
+    # 状态历史（教学亮点）
+    history = list(branch_graph.get_state_history(config))
+    print(f"\n📜 状态历史步数: {len(history)}")
+
+    # 可视化图
+    png_data = branch_graph.get_graph().draw_mermaid_png()
+    with open("branch_workflow_graph.png", "wb") as f:
+        f.write(png_data)
+    print("📊 工作流图已保存: branch_workflow_graph.png")
+
+```
+
+运行结果
+
+```
+🚀 启动分支工作流示例
+============================================================
+✅ [Node] 去重完成
+🤖 [Node] 摘要生成: LangGraph是LangChain生态的有状态工作流框架，支持图结构建模、状态追溯、动态分支和并行执行，适用于复杂AI任务编排。
+🔍 [Node] 敏感词检测: False
+📏 [Node] 质量校验 | 长度OK=False | 关键词OK=True | 合格=False
+🚦 [Router] quality=False, rewrite_count=0
+🔢 [Node] 重生成次数 -> 1
+🤖 [Node] 摘要生成: LangGraph是LangChain生态的有状态工作流框架，支持图结构建模、状态追溯、动态分支和并行执行，适用于复杂AI任务编排。
+🔍 [Node] 敏感词检测: False
+📏 [Node] 质量校验 | 长度OK=False | 关键词OK=True | 合格=False
+🚦 [Router] quality=False, rewrite_count=1
+🔢 [Node] 重生成次数 -> 2
+🤖 [Node] 摘要生成: LangGraph是LangChain生态的有状态工作流框架，支持图结构建模、状态追溯、动态分支和并行执行，适用于复杂AI任务编排。
+🔍 [Node] 敏感词检测: False
+📏 [Node] 质量校验 | 长度OK=False | 关键词OK=True | 合格=False
+🚦 [Router] quality=False, rewrite_count=2
+📤 [Node] 强制输出
+
+🎯 最终结果:
+
+⚠️ 摘要多次重生成仍不合格（教学示例）
+重生成次数: 2
+摘要长度: 66
+
+强制输出摘要：
+LangGraph是LangChain生态的有状态工作流框架，支持图结构建模、状态追溯、动态分支和并行执行，适用于复杂AI任务编排。
+
+
+📊 执行统计:
+重生成次数: 2
+质量是否合格: False
+
+📜 状态历史步数: 15
+📊 工作流图已保存: branch_workflow_graph.png
+```
+
+我们看一下工作图
+
+![6-6](..\src\img\6-6.png)
+
+### 6.4.4 案例3：循环工作流——人机互式文本优化
+
+本案例目标：构建“用户输入→文本优化→结果反馈→用户确认→确认通过→结束/确认不通过→重新优化”的多轮交互循环流程，模拟智能编辑助手场景，掌握循环边、人机交互节点、持久化状态的使用。
+
+#### 6.4.4.1 案例设计思路
+
+流程逻辑：用户输入待优化文本→AI优化文本→生成优化建议→展示结果给用户→用户输入“确认”则结束，输入“修改”则回退到优化节点重新生成，输入“退出”则终止流程。核心是实现“机器节点→人机交互节点→循环/终止”的闭环。
+
+知识点：循环边配置、动态输入接收、流程中断控制。
+
+```python
+
+import os
+from typing import TypedDict, Optional
+from dotenv import load_dotenv
+from langgraph.graph import StateGraph, START, END
+from langchain_core.prompts import PromptTemplate
+from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.memory import MemorySaver
+# ------------------------------
+# 1. 环境加载与模型初始化（保留你的DeepSeek配置，无任何修改）
+# ------------------------------
+load_dotenv()  # 加载.env中的API_KEY
+
+llm = ChatOpenAI(
+    api_key=os.getenv("API_KEY"),
+    base_url="https://api.deepseek.com",
+    model="deepseek-chat",
+    temperature=0.3
+)
+
+# ------------------------------
+# 2. 定义交互式状态（强类型，持久化存储所有流程数据）
+# ------------------------------
+class InteractiveOptState(TypedDict):
+    user_input: str                # 固定：用户原始输入（全程不变）
+    optimized_text: Optional[str]  # 动态：AI优化后文本（多轮更新）
+    optimize_suggest: Optional[str]# 动态：优化建议/理由（多轮更新）
+    user_feedback: Optional[str]   # 动态：用户反馈（确认/修改/退出）
+    final_result: Optional[str]    # 最终：流程结束结果
+
+# ------------------------------
+# 3. 核心节点函数（无任何修改，保留你的原代码）
+# ------------------------------
+def optimize_node(state: InteractiveOptState) -> InteractiveOptState:
+    """【机器节点】文本优化核心节点，使用管道符调用LLM"""
+    user_input = state["user_input"]
+    user_feedback = state["user_feedback"]
+
+    if not user_feedback:
+        prompt = PromptTemplate(
+            input_variables=["text"],
+            template="请优化以下文本，提升流畅度和专业度，严格保留核心信息：\n{text}\n优化完成后，单独一行以【优化理由：】开头给出1-2条简洁优化原因"
+        )
+        chain = prompt | llm
+        result = chain.invoke({"text": user_input}).content
+    else:
+        prompt = PromptTemplate(
+            input_variables=["text", "feedback"],
+            template="根据用户反馈针对性优化文本，严格保留核心信息：\n原文本：{text}\n用户反馈：{feedback}\n优化完成后，单独一行以【优化理由：】开头给出1-2条简洁优化原因"
+        )
+        chain = prompt | llm
+        result = chain.invoke({"text": user_input, "feedback": user_feedback}).content
+
+    split_flag = "【优化理由：】"
+    if split_flag in result:
+        optimized_text, optimize_suggest = result.split(split_flag, 1)
+    else:
+        optimized_text = result
+        optimize_suggest = "AI未生成明确优化理由，建议重新优化"
+
+    return {
+        "optimized_text": optimized_text.strip(),
+        "optimize_suggest": optimize_suggest.strip()
+    }
+
+def feedback_node(state: InteractiveOptState) -> InteractiveOptState:
+    """【人机交互节点】展示结果+接收用户反馈，流程中断核心"""
+    print("\n" + "-"*60)
+    print("📝 AI优化后文本：")
+    print(state["optimized_text"])
+    print("\n💡 优化建议/理由：")
+    print(state["optimize_suggest"])
+    print("\n" + "-"*60)
+
+    while True:
+        user_feedback = input("请输入反馈（仅需输入：确认/修改/退出）：").strip()
+        if user_feedback in ["确认", "修改", "退出"]:
+            break
+        print("❌ 输入无效！请严格输入「确认」「修改」「退出」，无其他字符\n")
+    return {"user_feedback": user_feedback}
+
+def feedback_router(state: InteractiveOptState) -> str:
+    """【条件路由节点】循环核心，直接返回目标节点名（最新API要求）"""
+    feedback = state["user_feedback"]
+    if feedback == "确认":
+        return "final"    # 确认→final节点
+    elif feedback == "修改":
+        return "optimize" # 修改→optimize节点（循环核心）
+    else:
+        return "exit"     # 退出→exit节点
+
+def final_node(state: InteractiveOptState) -> InteractiveOptState:
+    """【机器节点】流程正常结束，生成格式化结果"""
+    final_result = (
+        "✅ 【多轮文本优化流程完成】\n"
+        f"📌 最终优化文本：\n{state['optimized_text']}\n"
+        f"💡 优化核心总结：\n{state['optimize_suggest']}"
+    )
+    return {"final_result": final_result}
+
+def exit_node(state: InteractiveOptState) -> InteractiveOptState:
+    """【机器节点】用户主动退出，生成终止提示"""
+    return {"final_result": "🔚 【文本优化流程终止】\n你主动退出，本次无最终优化结果"}
+
+# ------------------------------
+# 4. 搭建循环交互图（无任何修改，保留你的原代码）
+# ------------------------------
+def build_interactive_graph():
+    """构建LangGraph循环状态图，彻底适配最新API终极规范"""
+    graph_builder = StateGraph(InteractiveOptState)
+
+    # 添加节点（无修改）
+    graph_builder.add_node("optimize", optimize_node)
+    graph_builder.add_node("feedback", feedback_node)
+    graph_builder.add_node("final", final_node)
+    graph_builder.add_node("exit", exit_node)
+
+    # 配置普通边（无修改）
+    graph_builder.add_edge(START, "optimize")
+    graph_builder.add_edge("optimize", "feedback")
+
+    # 适配最新API：source + path
+    graph_builder.add_conditional_edges(
+        source="feedback",  # 分支起始节点
+        path=feedback_router  # 路由函数（直接返回目标节点名）
+    )
+
+    # 配置结束边（无修改）
+    graph_builder.add_edge("final", END)
+    graph_builder.add_edge("exit", END)
+
+    # 编译图：开启状态持久化（多轮交互必需）
+    return graph_builder.compile(checkpointer=MemorySaver())
+
+# ------------------------------
+# 5. 运行交互测试（★仅修改初始输入部分★，改为用户手动输入+非空校验）
+# ------------------------------
+if __name__ == "__main__":
+    # 构建循环图（彻底解决所有API报错）
+    interactive_graph = build_interactive_graph()
+    print("🔧 多轮交互式文本优化工具已启动（适配LangGraph最新API）...\n")
+
+    # ★核心修改：用户手动输入待优化句子 + 非空校验★
+    print("="*40 + " 输入待优化句子 " + "="*40)
+    while True:
+        user_input_text = input("请输入需要AI优化的句子：").strip()
+        if user_input_text:  # 非空校验，避免用户输入空内容
+            break
+        print("❌ 输入不能为空，请重新输入需要优化的句子！\n")
+
+    # 初始状态：使用用户输入的句子，其余字段保持默认
+    initial_state: InteractiveOptState = {
+        "user_input": user_input_text,  # 替换为用户输入的内容
+        "optimized_text": None,
+        "optimize_suggest": None,
+        "user_feedback": None,
+        "final_result": None
+    }
+
+    # 启动多轮交互流程（保留你的config配置）
+    print(f"\n🚀 已接收你的句子，开始第一轮AI优化...")
+    config = {"configurable": {"thread_id": "text_process_test_001"}}
+    final_state = interactive_graph.invoke(initial_state, config=config)
+
+    # 展示最终结果
+    print("\n" + "="*60)
+    print(final_state["final_result"])
+    print("="*60)
+
+    # 展示交互轮次（状态持久化验证）
+    history = list(interactive_graph.get_state_history(config))
+    interact_rounds = len(history) // 2  # 每轮=优化节点+反馈节点
+    print("状态快照数量（超步骤）：", len(history))
+
+    # 保存可视化流程图（保留你的原代码）
+    png_data = interactive_graph.get_graph().draw_mermaid_png()  # 获取PNG字节流
+    with open("interactive_optimize_graph.png", "wb") as file:  # wb=二进制写入
+        file.write(png_data)
+    print("📊 工作流可视化图已保存：interactive_optimize_graph.png\n")
+```
+
+运行结果
+
+```
+请输入需要AI优化的句子：LangGraph这工具不错，能做工作流，比以前的Chain好用
+
+
+------------------------------------------------------------
+📝 AI优化后文本：
+LangGraph是一款优秀的工作流构建工具，相较于传统的Chain方案，其在功能与实用性上表现更为出色。
+
+💡 优化建议/理由：
+1. 将口语化、模糊的表达转化为具体、专业的表述，如将“不错”明确为“优秀”，“好用”具体化为“在功能与实用性上表现更为出色”。
+2. 优化了句子结构与逻辑关系，使对比更清晰、论述更流畅，提升了整体表达的严谨性。
+
+------------------------------------------------------------
+请输入反馈（仅需输入：确认/修改/退出）：修改
+
+📝 AI优化后文本：
+LangGraph是一款优秀的工作流构建工具，相较于传统的Chain，它在功能与易用性上更具优势。
+
+💡 优化建议/理由：
+1. 用词更正式、具体，如“优秀的工作流构建工具”明确了核心功能。
+2. 通过对比突出优势，使表述更客观有力。
+
+------------------------------------------------------------
+请输入反馈（仅需输入：确认/修改/退出）：确认
+
+✅ 【多轮文本优化流程完成】
+📌 最终优化文本：
+LangGraph是一款优秀的工作流构建工具，相较于传统的Chain，它在功能与易用性上更具优势。
+💡 优化核心总结：
+1. 用词更正式、具体，如“优秀的工作流构建工具”明确了核心功能。
+2. 通过对比突出优势，使表述更客观有力。
+============================================================
+```
+
+**核心小结：**
+
+**1. 人机交互节点设计**：feedback_node通过input()函数接收用户手动输入，实现“机器流程→人工干预→机器流程”的闭环，这类节点在智能助手、审批系统等场景中高频使用，核心是“状态接收用户输入，驱动后续流程”。
+
+**2. 动态优化适配**：optimize_node根据“user_feedback”是否存在，切换不同提示词，实现“针对性优化”——体现了状态的“记忆能力”，让多轮交互更智能，而非机械重复。
+
+**3. 流程中断控制**：通过“退出”分支直接终止流程，无需等待循环条件满足，给用户主动控制权，实际开发中可扩展为“超时退出”“异常退出”等多场景中断逻辑。
+
+### 6.4.5 综合实操小结
+
+本节三个案例从“线性→分支→循环”逐步递进，覆盖了LangGraph工作流的核心应用场景，核心要点可归纳为三点：
+
+第一，状态是核心枢纽：所有流程流转、节点协作都依赖状态，字段设计需“覆盖全链路需求”，同时通过状态历史实现追溯，这是LangGraph与其他工作流框架的核心差异。
+
+第二，边是流程灵魂：固定边保障基础线性流转，条件边实现动态分支，循环边支撑多轮交互，三类边的灵活组合可适配绝大多数复杂场景，配置时需重点关注“分支判断逻辑”和“循环终止条件”。
+
+第三，节点是功能载体：节点可封装任意逻辑（LLM调用、工具调用、人机交互），适配状态接口即可复用，开发时需遵循“单一职责”，避免节点逻辑过于复杂，便于调试和维护。
+
+## 6.5 本章总结与实践建议
+
+### 6.5.1 核心知识梳理
+
+本章围绕LangGraph三大核心组件（状态、节点、边）展开，从基础概念到融合实操，构建了“组件→机制→应用”的知识体系：
+
+1. 组件核心：状态是数据枢纽，节点是功能载体，边是路径灵魂，三者的灵活组合是构建复杂工作流的基础。
+2. 运行机制：以超步骤为单位的消息传递的，支持顺序与并行执行，理解该机制可精准调试流程执行顺序与节点依赖。
+3. 融合应用：LangGraph可无缝集成RAG、智能体、外部工具，实现“检索→生成→优化”“工具调用→分支决策”等生产级流程，解决传统线性流程的刚性问题。
+
+## 6.5.2 实践落地建议
+
+1. 从小场景入手：首次落地可从线性流程（如文本处理）开始，熟练后逐步添加分支、循环逻辑，再融合RAG、智能体等复杂场景。
+2. 重视状态设计：字段需覆盖“输入→过程→输出”全链路，避免冗余字段，同时预留调试字段（如重试次数、质量分数），便于问题排查。
+3. 节点拆分原则：遵循“单一职责”，将复杂逻辑拆分为多个轻量节点，便于单独调试、复用和扩展，避免单个节点逻辑过于臃肿。
+4. 强化容错设计：生产级流程需添加异常捕获、重试机制、循环终止条件，避免工具调用失败、逻辑错误导致流程卡死。
+
+### 6.5.3 实践练习
+
+完成本章中的langgraph学习案例，从实践中感悟langgraph的特性，完成综合实操的3个案例，针对案例3进行优化，进一步提升智能体的效果。
