@@ -1648,3 +1648,887 @@ else:
 
 实操案例：基于前面的“情节设计-审核”流程，添加MemorySaver，实现“保存进度-恢复进度”的功能，重点看检查点的配置和会话ID的使用。
 
+```python
+# ================== 导入依赖 ==================
+import os
+from typing import TypedDict, Optional
+from dotenv import load_dotenv
+
+from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import MemorySaver
+
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+
+# ================== 初始化环境变量 & LLM ==================
+load_dotenv()
+
+llm = ChatOpenAI(
+    api_key=os.getenv("API_KEY"),
+    base_url="https://api.deepseek.com",
+    model="deepseek-chat",
+    temperature=0.3
+)
+
+# ================== 定义状态 ==================
+class NovelState(TypedDict):
+    novel_name: str
+    plot: Optional[str]
+    retry_count: int
+    review_result: Optional[str]
+    failed: Optional[bool]
+
+# ================== plot 节点 ==================
+def plot_agent(state: NovelState) -> dict:
+    prompt = ChatPromptTemplate.from_template(
+        """请撰写小说《{novel_name}》的第一章情节，要求：
+1. 引出主角；
+2. 交代核心冲突；
+3. 篇幅约200字。"""
+    )
+    chain = prompt | llm
+    result = chain.invoke({"novel_name": state["novel_name"]})
+
+    return {
+        "plot": result.content,
+        "retry_count": state.get("retry_count", 0)
+    }
+
+# ================== review 节点 ==================
+def review_agent(state: NovelState) -> dict:
+    prompt = ChatPromptTemplate.from_template(
+        """请审核以下小说情节是否达标，审核标准：
+1. 引出主角；
+2. 交代核心冲突；
+3. 篇幅约200字。
+
+情节：
+{plot}
+
+⚠️ 只返回 'pass' 或 'retry'。"""
+    )
+    chain = prompt | llm
+    result = chain.invoke({"plot": state["plot"]})
+
+    return {
+        "review_result": result.content.strip().lower()
+    }
+
+# ================== 条件分支 ==================
+MAX_RETRIES = 2
+
+def decide_next_node(state: NovelState) -> str:
+    retry_count = state.get("retry_count", 0)
+
+    if state["review_result"] == "pass":
+        return END
+
+    if retry_count >= MAX_RETRIES:
+        state["failed"] = True
+        return END
+
+    state["retry_count"] = retry_count + 1
+    return "plot"
+
+# ================== 构建 LangGraph ==================
+graph = StateGraph(NovelState)
+
+graph.add_node("plot", plot_agent)
+graph.add_node("review", review_agent)
+
+graph.add_edge(START, "plot")
+graph.add_edge("plot", "review")
+graph.add_conditional_edges("review", decide_next_node)
+
+# ================== 启用 checkpoint ==================
+checkpointer = MemorySaver()
+
+app = graph.compile(checkpointer=checkpointer)
+
+# =====================================================
+# 第一阶段：执行到 plot 节点后中断
+# =====================================================
+print("\n=== 第一次运行（执行到 plot 后中断）===")
+
+thread_id = "novel_session_001"
+
+stream = app.stream(
+    {
+        "novel_name": "星际流浪记",
+        "retry_count": 0,
+        "plot": None,
+        "review_result": None,
+        "failed": False
+    },
+    config={
+        "configurable": {
+            "thread_id": thread_id
+        }
+    }
+)
+
+for step in stream:
+    print("当前 step：", step)
+
+    # 只要 plot 执行完，就人为中断
+    if "plot" in step:
+        plot_state = step["plot"]
+
+        print("\n🛑 模拟程序中断（Ctrl+C 场景）")
+        print(f"中断时版本：第 {plot_state['retry_count']} 版")
+        print(f"中断时情节内容：\n{plot_state['plot']}")
+
+        break   # ⛔ 中断执行
+
+# =====================================================
+# 第二阶段：从 checkpoint 恢复
+# =====================================================
+print("\n=== 第二次运行（从存档恢复）===")
+
+result = app.invoke(
+    None,  # 不传新输入
+    config={
+        "configurable": {
+            "thread_id": thread_id
+        }
+    }
+)
+
+print("\n✅ 恢复后最终结果")
+print(f"重试次数：{result['retry_count']}")
+print(f"是否失败：{result.get('failed')}")
+print("\n最终情节：\n")
+print(result["plot"])
+
+```
+
+运行结果
+
+```
+=== 第一次运行（执行到 plot 后中断）===
+当前 step： {'plot': {'plot': '# 《星际流浪记》第一章：残骸中的心跳\n\n“星尘号”的残骸在寂静的深空中缓缓旋转，像一具冰冷的金属尸体。李星云从减压舱的破口飘出，宇航 服头盔的裂纹处凝结着细小的冰晶。他是这艘科研船唯一的幸存者——至少在目前发现的范围内。\n\n他打开头盔的应急灯，光束切开黑暗，照亮了漂浮的数据板碎片。上面滚动着最后接收到的信息片段：“……遭遇不明引力源……结构完整性丧失……”但李星云知道，那根本不是自然现象。在船体解体的瞬间，他瞥见了那东西——一片吞噬光线的黑暗，边缘泛着不自然的紫光，像一只缓缓睁开的眼睛。\n\n氧气存量显示还剩四十七分钟。李星云在残骸间移动，试图寻找还能使用的信号发射器。就在这时，他手腕上的生物监测仪突然跳动了一下——不是他自己的心跳。在二十米外的货柜舱方向，传来了另一个生命体征信号，稳定而有力。\n\n他愣住了。出发前，“星尘号”的船员名单上只有七个人，全部已被标记为死亡。这个信号是谁的？或者说，是什么？\n\n紫光在远处的残骸边缘一闪而过。李星云抓紧了手中的焊接枪，意识到自己可能根本不是幸存者——而是某个东西留下的唯一目击者。', 'retry_count': 0}}
+
+🛑 模拟程序中断（Ctrl+C 场景）
+中断时版本：第 0 版
+中断时情节内容：
+# 《星际流浪记》第一章：残骸中的心跳
+
+“星尘号”的残骸在寂静的深空中缓缓旋转，像一具冰冷的金属尸体。李星云从减压舱的破口飘出，宇航服头盔的裂纹处凝结着细小的冰晶。他是这艘科研船唯一的幸存者——至少在目前发现的范围内。
+
+他打开头盔的应急灯，光束切开黑暗，照亮了漂浮的数据板碎片。上面滚动着最后接收到的信息片段：“……遭遇不明引力源……结构完整性丧失……”但李星云知道，那根本不是自然现象。在船体解体的瞬间，他瞥见了那东西——一片吞噬光线的黑暗，边缘泛着不自然的紫光，像一只缓缓睁开的眼睛。
+
+氧气存量显示还剩四十七分钟。李星云在残骸间移动，试图寻找还能使用的信号发射器。就在这时，他手腕上的生物监测仪突然跳动了一下——不是他自己的心跳。在二十米外的货柜舱方向，传来了另一个生命体征信号，稳定而有力。
+
+他愣住了。出发前，“星尘号”的船员名单上只有七个人，全部已被标记为死亡。这个信号是谁的？或者说，是什么？
+
+紫光在远处的残骸边缘一闪而过。李星云抓紧了手中的焊接枪，意识到自己可能根本不是幸存者——而是某个东西留下的唯一目击者。
+
+=== 第二次运行（从存档恢复）===
+
+✅ 恢复后最终结果
+重试次数：0
+是否失败：False
+
+最终情节：
+
+# 《星际流浪记》第一章：残骸中的心跳
+
+“星尘号”的残骸在寂静的深空中缓缓旋转，像一具冰冷的金属尸体。李星云从减压舱的破口飘出，宇航服头盔的裂纹处凝结着细小的冰晶。他是这艘科研船唯一的幸存者——至少在目前发现的范围内。
+
+他打开头盔的应急灯，光束切开黑暗，照亮了漂浮的数据板碎片。上面滚动着最后接收到的信息片段：“……遭遇不明引力源……结构完整性丧失……”但李星云知道，那根本不是自然现象。在船体解体的瞬间，他瞥见了那东西——一片吞噬光线的黑暗，边缘泛着不自然的紫光，像一只缓缓睁开的眼睛。
+
+氧气存量显示还剩四十七分钟。李星云在残骸间移动，试图寻找还能使用的信号发射器。就在这时，他手腕上的生物监测仪突然跳动了一下——不是他自己的心跳。在二十米外的货柜舱方向，传来了另一个生命体征信号，稳定而有力。
+
+他愣住了。出发前，“星尘号”的船员名单上只有七个人，全部已被标记为死亡。这个信号是谁的？或者说，是什么？
+
+紫光在远处的残骸边缘一闪而过。李星云抓紧了手中的焊接枪，意识到自己可能根本不是幸存者——而是某个东西留下的唯一目击者。
+```
+
+【学习提示】
+
+- **核心步骤**： 初始化 `MemorySaver` 作为检查点存储；在编译图时通过`graph.compile(checkpointer=memory)` 启用 checkpoint；
+   运行时在 `config` 中传入同一个 **`thread_id`** 用于关联会话存档；当任务中断后，再次运行时只需传入相同的 `thread_id`，即可从上一次保存的节点继续执行。
+- **运行现象观察**： 第一次运行使用 `stream()` 执行流程，并在 `plot` 节点完成后人为中断（模拟程序崩溃），此时情节已生成但尚未进入 `review` 节点；第二次运行时传入相同的 `thread_id`，LangGraph 会自动从 checkpoint 中恢复状态，**直接从 `review` 节点继续执行**，而不会重新生成情节内容。
+- **注意事项**：默认使用的 `MemorySaver` 仅将存档保存在**进程内存**中，程序重启后存档会丢失；在生产级应用中，如需跨进程或长期保存执行进度，可将 `MemorySaver` 替换为 LangGraph 支持的**持久化 checkpointer**（如 SQLite、Redis 等），仅需`checkpointer` 的实现即可。
+
+### 7.3.2 中断机制（Interrupts）实战
+
+核心需求：工作流运行到某个关键节点（比如转账、发邮件、发布内容）时，自动中断，等待人工授权/确认后，再继续执行——防止智能体误操作，保障流程安全。LangGraph提供了interrupt_before和interrupt_after参数，专门实现中断机制。
+
+重点区分两个参数（通俗版）：
+
+- interrupt_before：在节点执行**之前**中断，等待人工授权后，再执行该节点（适合关键操作，比如“发邮件”节点，先授权再发邮件）；
+- interrupt_after：在节点执行**之后**中断，等待人工确认结果后，再进入下一个节点（适合需要人工检查结果的场景）。
+
+#### 7.3.2.1 在执行前中断：关键操作（如转账、发邮件）的人工授权
+
+实操案例：做一个“邮件发送”工作流，包含“撰写邮件”和“发送邮件”两个节点，其中“发送邮件”是关键操作，需要在执行前中断，等待人工输入“确认发送”后，再执行发送操作。
+
+```python
+# ================== 导入依赖 ==================
+import os
+from typing import TypedDict
+from dotenv import load_dotenv
+
+from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import MemorySaver
+
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+
+# ================== 初始化环境变量 & LLM ==================
+load_dotenv()
+
+llm = ChatOpenAI(
+    api_key=os.getenv("API_KEY"),
+    base_url="https://api.deepseek.com",
+    model="deepseek-chat",
+    temperature=0.3
+)
+
+# ================== 定义状态 ==================
+class EmailState(TypedDict):
+    sender: str
+    recipient: str
+    email_type: str
+    subject: str
+    email_content: str
+    send_status: str
+
+# ================== 节点 1：撰写邮件 ==================
+def write_email_agent(state: EmailState) -> dict:
+    prompt = ChatPromptTemplate.from_template(
+        """请以{sender}的身份，给{recipient}写一封{email_type}邮件，
+主题是《{subject}》，内容简洁、正式、符合邮件格式。"""
+    )
+
+    chain = prompt | llm
+    result = chain.invoke({
+        "sender": state["sender"],
+        "recipient": state["recipient"],
+        "email_type": state["email_type"],
+        "subject": state["subject"]
+    })
+
+    return {
+        "email_content": result.content
+    }
+
+# ================== 节点 2：发送邮件（模拟） ==================
+def send_email_agent(state: EmailState) -> dict:
+    print("\n📤 【邮件发送成功】")
+    print(f"收件人：{state['recipient']}")
+    print(f"主题：{state['subject']}")
+    print(f"内容：\n{state['email_content']}\n")
+
+    return {
+        "send_status": "success"
+    }
+
+# ================== 构建 LangGraph ==================
+graph = StateGraph(EmailState)
+
+graph.add_node("write_email", write_email_agent)
+graph.add_node("send_email", send_email_agent)
+
+graph.add_edge(START, "write_email")
+graph.add_edge("write_email", "send_email")
+graph.add_edge("send_email", END)
+
+# ================== 启用 MemorySaver + 中断配置 ==================
+memory = MemorySaver()
+
+app = graph.compile(
+    checkpointer=memory,
+    interrupt_before=["send_email"]  # ⭐ 关键：发送前中断
+)
+
+# =====================================================
+# 第一次运行：执行到 send_email 前中断
+# =====================================================
+print("\n=== 第一次运行：生成邮件，等待人工确认 ===")
+
+thread_id = "email_session_001"
+
+stream = app.stream(
+    {
+        "sender": "学生张三",
+        "recipient": "老师@xxx.edu.cn",
+        "email_type": "请假",
+        "subject": "请假申请（1天）"
+    },
+    config={
+        "configurable": {
+            "thread_id": thread_id
+        }
+    }
+)
+
+for step in stream:
+    if "write_email" in step:
+        print("\n✉️ 已生成邮件内容：\n")
+        print(step["write_email"]["email_content"])
+        print("\n⚠️ 系统已在【发送邮件】前中断")
+        print("请输入：确认发送  → 继续执行\n")
+
+# =====================================================
+# 人工确认
+# =====================================================
+user_input = input("请输入授权指令：")
+
+if user_input.strip() == "确认发送":
+    print("\n=== 已确认，继续执行发送节点 ===")
+
+    result = app.invoke(
+        None,  # 不传新状态，直接从 checkpoint 恢复
+        config={
+            "configurable": {
+                "thread_id": thread_id
+            }
+        }
+    )
+
+    print("✅ 工作流完成，发送状态：", result.get("send_status"))
+
+else:
+    print("\n❌ 已取消发送，工作流终止")
+
+```
+
+运行结果
+
+```python
+=== 第一次运行：生成邮件，等待人工确认 ===
+
+✉️ 已生成邮件内容：
+
+**主题：请假申请（1天）**
+
+尊敬的老师：
+
+您好！
+
+我是您的学生张三，因个人事务需要处理，特此申请于 [请填写具体日期，例如：2024年10月20日] 请假一天。请假期间，我会自行安排时间补上课程内容，并按时完成相关作业。    
+
+感谢您的理解与支持！如有需要，我可提供相关说明。
+
+祝您工作顺利！
+
+学生：张三
+学号：[请填写您的学号]
+联系电话：[请填写您的手机号码]
+日期：2024年10月18日
+
+⚠️ 系统已在【发送邮件】前中断
+请输入：确认发送  → 继续执行
+
+请输入授权指令：确认发送
+
+=== 已确认，继续执行发送节点 ===
+
+✅ 工作流完成，发送状态： success
+```
+
+【学习提示】
+
+- 核心配置：compile()时传入interrupt_before={"send_email"}，表示在send_email节点执行前中断；
+- 运行代码时，会先执行write_email节点，生成邮件内容，然后中断，等待人工输入“确认发送”后，才会执行send_email节点；如果输入其他内容，会终止工作流，避免误操作；
+- 实际开发中，中断后的人工授权可以做的更友好（比如通过网页界面、小程序确认），这里用input()模拟，核心逻辑一致。
+
+#### 7.3.2.2 案例演示：设计一个“需要用户审批”的节点
+
+结合前面的知识点，设计一个完整的“多智能体任务审批”流程，包含3个节点：任务分配Agent、任务执行Agent、审批Agent（需要人工审批），其中审批Agent执行前中断，等待人工审批后，再确认任务结果。
+
+```python
+# ================== 导入依赖 ==================
+import os
+from typing import TypedDict
+from dotenv import load_dotenv
+
+from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import MemorySaver
+
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+
+# ================== 初始化环境变量 & LLM ==================
+load_dotenv()
+
+llm = ChatOpenAI(
+    api_key=os.getenv("API_KEY"),
+    base_url="https://api.deepseek.com",
+    model="deepseek-chat",
+    temperature=0.3
+)
+
+# ================== 定义状态 ==================
+class TaskState(TypedDict):
+    agent_name: str
+    task_type: str
+    task: str
+    task_result: str
+    approve_status: str
+    retry: bool
+
+# ================== 节点 1：任务分配 Agent ==================
+def assign_task_agent(state: TaskState) -> dict:
+    prompt = ChatPromptTemplate.from_template(
+        "请给{agent_name}分配一个{task_type}任务，要求具体、可执行，篇幅50字以内。"
+    )
+    chain = prompt | llm
+    result = chain.invoke({
+        "agent_name": state["agent_name"],
+        "task_type": state["task_type"]
+    })
+    return {"task": result.content}
+
+# ================== 节点 2：任务执行 Agent ==================
+def execute_task_agent(state: TaskState) -> dict:
+    prompt = ChatPromptTemplate.from_template(
+        "请执行以下任务：{task}，要求输出执行结果，简洁明了。"
+    )
+    chain = prompt | llm
+    result = chain.invoke({"task": state["task"]})
+    return {"task_result": result.content}
+
+# ================== 节点 3：审批 Agent（关键节点，中断） ==================
+def approve_task_agent(state: TaskState) -> dict:
+    print("\n📝 【任务审批节点】")
+    print(f"Agent：{state['agent_name']}")
+    print(f"任务：{state['task']}")
+    print(f"执行结果：{state['task_result']}")
+    return {"approve_status": "passed"}
+
+# ================== 构建工作流 ==================
+graph = StateGraph(TaskState)
+
+graph.add_node("assign_task", assign_task_agent)
+graph.add_node("execute_task", execute_task_agent)
+graph.add_node("approve_task", approve_task_agent)
+
+graph.add_edge(START, "assign_task")
+graph.add_edge("assign_task", "execute_task")
+graph.add_edge("execute_task", "approve_task")
+graph.add_edge("approve_task", END)
+
+# ================== 启用 MemorySaver + 中断 ==================
+memory = MemorySaver()
+
+# 修改：增加 interrupt_after 演示
+app = graph.compile(
+    checkpointer=memory,
+    interrupt_before=["approve_task"],  # 审批节点前中断
+    interrupt_after=["execute_task"]    # 任务执行后中断
+)
+
+# ================== 第一次运行：执行到审批节点 ==================
+thread_id = "multi_agent_task_001"
+print("\n=== 第一次运行：任务分配与执行 ===")
+
+stream = app.stream(
+    {
+        "agent_name": "情节设计Agent",
+        "task_type": "小说章节情节撰写"
+    },
+    config={"configurable": {"thread_id": thread_id}}
+)
+
+for step in stream:
+    if "assign_task" in step:
+        print(f"\n📝 分配的任务：\n{step['assign_task']['task']}")
+    if "execute_task" in step:
+        print(f"\n✅ 任务执行结果：\n{step['execute_task']['task_result']}")
+        print("\n⚠️ 系统已在任务执行后中断，请查看执行结果（输入任意内容继续）")
+        input("按回车继续到审批节点...")
+
+# ================== 人工审批 ==================
+print("\n⚠️ 审批节点已中断，请进行人工审批（输入'审批通过'继续，其他内容驳回）")
+user_input = input("请输入审批指令：")
+
+if user_input.strip() == "审批通过":
+    print("\n=== 审批通过，继续执行审批节点 ===")
+    result = app.invoke(
+        None,  # 从中断点继续，不需要传入新参数
+        config={"configurable": {"thread_id": thread_id}}
+    )
+    print("\n✅ 工作流完成，审批状态：", result.get("approve_status"))
+
+else:
+    print("\n❌ 审批驳回，任务需重新执行")
+    # 驳回后可重新执行任务执行节点（示例：传入 retry 标记）
+    result = app.invoke(
+        {"retry": True},
+        config={"configurable": {"thread_id": thread_id}}
+    )
+    print("\n🔁 工作流已重新执行，状态：", result.get("approve_status"))
+
+```
+
+【学习提示】
+ 本案例结合了 **节点串联**、**中断机制（前中断 + 后中断）**、**检查点保存**，模拟了真实场景下的 **任务分配 → 执行 → 审批** 流程。
+
+- `interrupt_after=["execute_task"]`：任务执行完成后中断，人工查看执行结果或确认再进入审批节点
+- `interrupt_before=["approve_task"]`：审批节点执行前中断，保证关键操作不会误执行
+
+**操作练习**：可以尝试修改任务类型（例如 `"代码生成"`、`"文案撰写"` 等），观察 **任务执行后的中断 + 审批节点中断** 是否正常，体会 **人工干预在关键环节的作用**。
+
+**拓展思路**：审批驳回后，可结合前面的 **循环重试逻辑**，让流程自动返回任务执行节点重新执行任务，使工作流更完整、可用于多轮审批场景；同时仍保持 **中断 + 检查点机制**，确保关键操作安全可控。
+
+**核心机制回顾**：
+ 1️⃣ `interrupt_after`：节点执行完后中断，可人工查看或确认执行结果
+ 2️⃣ `interrupt_before`：关键节点执行前中断，人工确认再执行
+ 3️⃣ `MemorySaver + thread_id`：保存中断状态，实现断点续跑
+
+### 7.3.3 动态状态编辑（State Management）
+
+核心需求：工作流运行过程中，人工可以干预并修改智能体的中间输出（比如情节设计Agent写的情节有错误，人工直接修改），或者将工作流回退到之前的某个节点（比如审批驳回后，回退到任务执行节点重新执行）——这就是动态状态编辑，LangGraph 可以通过修改checkpoint的state实现。
+
+#### 7.3.3.1 手动修正：人工干预并修改智能体的中间输出
+
+实操案例：基于前面的“情节设计”流程，当审核发现情节有错误时，人工手动修改情节内容，以修改角色名字为例。重点看如何修改checkpoint中的state状态。
+
+```python
+# ================== 导入依赖 ==================
+import os
+from typing import TypedDict, Optional
+from dotenv import load_dotenv
+
+from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import MemorySaver
+
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+
+# ================== 初始化环境变量 & LLM ==================
+load_dotenv()
+
+llm = ChatOpenAI(
+    api_key=os.getenv("API_KEY"),
+    base_url="https://api.deepseek.com",
+    model="deepseek-chat",
+    temperature=0.3
+)
+
+# ================== 定义状态 ==================
+class NovelState(TypedDict):
+    novel_name: str
+    protagonist: str
+    plot: Optional[str]
+
+# ================== 节点：情节生成 Agent ==================
+def plot_agent(state: NovelState):
+    prompt = ChatPromptTemplate.from_template(
+        """
+请撰写小说《{novel_name}》的第一章情节，约200字。
+主角名必须叫：{protagonist}
+"""
+    )
+    msg = llm.invoke(
+        prompt.format_messages(
+            novel_name=state["novel_name"],
+            protagonist=state["protagonist"]
+        )
+    )
+    return {"plot": msg.content}
+
+# ================== 构建工作流 ==================
+graph = StateGraph(NovelState)
+
+graph.add_node("plot", plot_agent)
+
+graph.add_edge(START, "plot")
+graph.add_edge("plot", END)
+
+# ================== 启用 MemorySaver + 中断 ==================
+memory = MemorySaver()
+
+app = graph.compile(
+    checkpointer=memory,
+    interrupt_after=["plot"]  # ⭐ 情节生成后立刻中断
+)
+
+# ================== 第一次运行：生成情节并中断 ==================
+thread_id = "dynamic_state_edit_demo"
+
+print("\n=== 第一次运行：生成情节并中断 ===\n")
+
+for step in app.stream(
+    {
+        "novel_name": "星际流浪记",
+        "protagonist": "林启"
+    },
+    config={"configurable": {"thread_id": thread_id}}
+):
+    if "plot" in step:
+        print("【原始情节】\n")
+        print(step["plot"]["plot"])
+        print("\n⚠️ 工作流已中断，可进行【动态状态编辑】")
+
+# ================== 动态状态编辑：只修改主角名字 ==================
+print("\n=== 动态状态编辑：人工修改主角名字 ===\n")
+
+new_name = input("请输入新的主角名字：").strip()
+
+# 从 checkpoint 里取当前状态
+checkpoint = memory.get({"configurable": {"thread_id": thread_id}})
+state = checkpoint["channel_values"]
+
+old_name = state["protagonist"]
+old_plot = state["plot"]
+
+# 只替换主角名字（教学最直观）
+new_plot = old_plot.replace(old_name, new_name)
+
+# ⭐ 正确写回方式：update_state
+app.update_state(
+    config={"configurable": {"thread_id": thread_id}},
+    values={
+        "protagonist": new_name,
+        "plot": new_plot
+    }
+)
+
+print("\n✅ 状态已更新，继续执行工作流...\n")
+
+# ================== 第二次运行：从中断点继续 ==================
+final_state = app.invoke(
+    None,
+    config={"configurable": {"thread_id": thread_id}}
+)
+
+print("\n=== 最终状态（已被人工修改）===\n")
+print(final_state["plot"])
+
+```
+
+运行结果
+
+```
+=== 第一次运行：生成情节并中断 ===
+
+【原始情节】
+
+## 星际流浪记
+>林启在废弃空间站醒来，记忆全无。
+>他发现自己左臂被植入未知金属装置，能凭空生成能量护盾。
+>为躲避神秘武装组织的追捕，他劫持一艘破旧货运飞船逃离。
+>飞船AI突然激活，称他为“最后的星门守护者”。
+>舷窗外，银河在黑暗中无声旋转，而追兵的红色激光已如毒蛇般咬来。
+---
+
+林启在绝对的寂静中醒来。
+
+...
+
+⚠️ 工作流已中断，可进行【动态状态编辑】
+
+=== 动态状态编辑：人工修改主角名字 ===
+
+请输入新的主角名字：牧小熊
+
+✅ 状态已更新，继续执行工作流...
+
+
+=== 最终状态（已被人工修改）===
+
+## 星际流浪记
+>牧小熊在废弃空间站醒来，记忆全无。
+>他发现自己左臂被植入未知金属装置，能凭空生成能量护盾。
+>为躲避神秘武装组织的追捕，他劫持一艘破旧货运飞船逃离。
+>飞船AI突然激活，称他为“最后的星门守护者”。
+>舷窗外，银河在黑暗中无声旋转，而追兵的红色激光已如毒蛇般咬来。
+---
+
+牧小熊在绝对的寂静中醒来。
+
+不是睡醒，是某种更深、更彻底的“重启”。眼皮沉重如闸，他费力掀开，视野里只有一片模糊的、缓慢旋转的金属网格天花板。冷光从网格缝隙漏下，灰尘在光柱里浮沉。空气带着铁锈和某种陈腐机油的涩味，冰冷地灌入肺叶。
+
+...
+```
+
+【学习提示】
+
+1.**查看状态**
+
+- 使用 `memory.get({"configurable": {"thread_id": thread_id}})` 可以获取当前工作流的 checkpoint 状态。
+- 其中 `channel_values` 存储了各字段（如 `novel_name`、`protagonist`、`plot`）的最新值。
+
+2.**修改状态**
+
+- 不直接修改 `checkpoint` 返回的字典，而是通过 `app.update_state(config, values)` 更新工作流状态。
+- 可以修改任意中间输出，例如：
+  - 修正情节文本 (`plot`)
+  - 更换主角名字 (`protagonist`)
+- 修改后，后续节点会使用新状态继续执行，无需从头运行整个流程。
+
+3.**核心逻辑**
+
+- `MemorySaver` 与 `checkpoint` 结合，保证中间状态可被编辑。
+- 使用 `interrupt_after` 或 `interrupt_before` 可在关键节点前/后中断，便于人工干预。
+
+4.**操作练习**
+
+- 运行代码生成原始情节，中断后查看输出。
+- 模拟情节逻辑错误或需要改动，人工修改 `plot` 或 `protagonist`。
+- 调用 `app.update_state()` 写回修改后的状态。
+- 继续执行工作流，观察最终输出是否使用了人工修正后的内容。
+
+#### 7.3.3.2 回退与跳转：将工作流重置到之前的任意节点
+
+除了修改中间输出，动态状态编辑还支持“工作流回退”——当某个节点执行失败、输出不符合预期时，将工作流回退到之前的某个节点（如回退到任务分配节点、任务执行节点），重新执行该节点及后续流程，无需从头开始。
+
+核心原理：通过 `update_state()` 方法，可以手动设置工作流的 **当前执行节点 (`current_node`)**，将其重置到目标节点。
+
+```python
+# ================== 导入依赖 ==================
+import os
+from typing import TypedDict, Optional
+from dotenv import load_dotenv
+
+from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import MemorySaver
+
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+
+# ================== 初始化环境变量 & LLM ==================
+load_dotenv()
+
+llm = ChatOpenAI(
+    api_key=os.getenv("API_KEY"),
+    base_url="https://api.deepseek.com",
+    model="deepseek-chat",
+    temperature=0.3
+)
+
+# ================== 定义状态 ==================
+class NovelState(TypedDict):
+    novel_name: str
+    protagonist: str
+    plot: Optional[str]
+
+# ================== 节点：情节生成 Agent ==================
+def plot_agent(state: NovelState):
+    prompt = ChatPromptTemplate.from_template(
+        """
+请撰写小说《{novel_name}》的第一章情节，约200字。
+主角名必须叫：{protagonist}
+"""
+    )
+    msg = llm.invoke(
+        prompt.format_messages(
+            novel_name=state["novel_name"],
+            protagonist=state["protagonist"]
+        )
+    )
+    return {"plot": msg.content}
+
+# ================== 构建工作流 ==================
+graph = StateGraph(NovelState)
+graph.add_node("plot", plot_agent)
+graph.add_edge(START, "plot")
+graph.add_edge("plot", END)
+
+# ================== 启用 MemorySaver + 中断 ==================
+memory = MemorySaver()
+
+app = graph.compile(
+    checkpointer=memory,
+    interrupt_after=["plot"]  # 情节生成后中断
+)
+
+# ================== 第一次运行：生成情节并中断 ==================
+thread_id = "workflow_rollback_demo"
+
+print("\n=== 第一次运行：生成情节并中断 ===\n")
+
+for step in app.stream(
+    {
+        "novel_name": "星际流浪记",
+        "protagonist": "林启"
+    },
+    config={"configurable": {"thread_id": thread_id}}
+):
+    if "plot" in step:
+        print("【原始情节】\n")
+        print(step["plot"]["plot"])
+        print("\n⚠️ 工作流已中断，可演示【回退到 plot 节点】")
+
+# ================== 工作流回退示例 ==================
+print("\n=== 回退示例：将工作流回退到 plot 节点 ===\n")
+
+# 获取 checkpoint 当前状态
+checkpoint = memory.get({"configurable": {"thread_id": thread_id}})
+state = checkpoint["channel_values"]
+
+# 使用 update_state 设置 current_node，实现回退
+app.update_state(
+    config={"configurable": {"thread_id": thread_id, "current_node": "plot"}},
+    values=state
+)
+
+print("✅ 工作流已回退到 plot 节点，准备重新执行该节点及后续流程...\n")
+
+# ================== 继续执行回退后的工作流 ==================
+final_state = app.invoke(
+    None,
+    config={"configurable": {"thread_id": thread_id}}
+)
+
+print("\n=== 最终状态（回退后重新执行 plot 节点完成）===\n")
+print(final_state["plot"])
+print("\n✅ 工作流回退并重新执行完成")
+
+```
+
+运行结果
+
+```
+=== 第一次运行：生成情节并中断 ===
+
+【原始情节】
+
+## 星际流浪记
+>林启在废弃空间站醒来，记忆全无。
+>身边只有一枚刻着陌生坐标的金属圆片，和一行小字：“找到‘星海之眼’。”
+>当他启动唯一能用的逃生舱时，却发现燃料只够抵达坐标附近最荒芜的死亡星带。
+>更糟的是，舱内屏幕闪烁起一行冰冷的警告：“检测到追踪信号源——身份：帝国最高通缉犯。”
+
+---
+
+林启...
+
+⚠️ 工作流已中断，可演示【回退到 plot 节点】
+
+=== 回退示例：将工作流回退到 plot 节点 ===
+
+✅ 工作流已回退到 plot 节点，准备重新执行该节点及后续流程...
+
+
+=== 最终状态（回退后重新执行 plot 节点完成）===
+
+## 星际流浪记
+>林启在废弃空间站醒来，记忆全无。
+>身边只有一枚刻着陌生坐标的金属圆片，和一行小字：“找到‘星海之眼’。”
+>当他启动唯一能用的逃生舱时，却发现燃料只够抵达坐标附近最荒芜的死亡星带。
+>更糟的是，舱内屏幕闪烁起一行冰冷的警告：“检测到追踪信号源——身份：帝国最高通缉犯。”
+
+---
+
+林启...
+
+✅ 工作流回退并重新执行完成
+```
+
+【学习提示】
+
+1.**回退的核心**：通过 `app.update_state()` 设置 `current_node`（当前执行节点），将工作流重置到目标回退节点（如 `"execute_task"`）。
+
+2.**状态保留**：回退时可以保留原有状态（如 `task`），也可以修改状态（如清空 `task_result`、添加 `retry` 标记），灵活度高。
+
+## 7.4 综合实践：小说创作助手
+
+经过了2章的学习，现在大家应该掌握了langgraph的各个相关知识，现在到了考验大家的时候~
+
+读书的时候，笔者一直迷恋小说，有时候在想，我要是小说中的主角就好了，打败反派拯救世界，现在要借助AI来实现我的愿望了，因此我们综合实践就是通过智能体生成小说。由于篇幅的关系，我们会按照最简单的形式去完成，主要目的是从综合实践中掌握langgraph框架。
+

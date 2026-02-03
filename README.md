@@ -59,8 +59,12 @@
 | <strong>第三部分：LangGraph组件与实战</strong> |  |  |
 | [第六章 LangGraph基础：有状态工作流与核心概念实操](./docs/chapter6.md) | 有状态工作流、节点、边、状态管理 | ✅    |
 | [第七章 LangGraph进阶：多智能体协作与复杂流程管控](./docs/chapter7.md) | 多智能体协作、复杂流程管控 | 🚧    |
-| [第八章 Skills在lang系列框架中的应用](./docs/chapter8.md) | SKILL应用 | 🚧    |
-| [第九章 综合实战：构建“谁是卧底”游戏智能体](./docs/chapter9.md) | 综合实战 | 🚧    |
+| [第八章 综合实战：构建“谁是卧底”游戏智能体](./docs/chapter8.md) | 综合实战 | 🚧    |
+| <strong>第四部分：工程化应用技巧</strong> |  |  |
+| [第九章 Skills在lang系列框架中的应用](./docs/chapter9.md) | Skills应用 | 🚧    |
+| [第十章 agents工程化应用技巧](./docs/chapter10.md) | 工程化落地技巧 | 🚧    |
+| [结语](./docs/结语.md)        | 项目总结与展望   | 🚧    |
+
 
 ## ✨核心贡献者
 - [牧小熊-项目负责人](https://github.com/muxiaoxiong) (Datawhale成员)
