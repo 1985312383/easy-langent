@@ -64,6 +64,7 @@
 | 项目名称                                                 | 备注              | 作者    |
 | -------------------------------------------------------- | ----------------- | ------- |
 | [狼人杀（上帝视角）](./project/werewolfGameAi/README.md) | 基于langgraph开发 | 内测组  |
+| [剧本杀4人版](./project/ScriptedMurderGame/README.md) | 基于langgraph开发 | winnerFlyer  |
 | [智能知识库问答](./project/AgenticRag/README.md)         | 基于langchain开发 | jspi-fu |
 | [MCPChat](./project/MCPChat/README.md)                   | 基于langchain开发 | jspi-fu |
 | [数据处理智能体](./project/DataAgent/README.md)          | 基于langchain开发 | jspi-fu |
