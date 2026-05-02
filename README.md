@@ -69,6 +69,7 @@
 | [MCPChat](./project/MCPChat/README.md)                   | 基于langchain开发 | jspi-fu |
 | [数据处理智能体](./project/DataAgent/README.md)          | 基于langchain开发 | jspi-fu |
 | [医疗RAG诊断](./project/MedicalRag/README.md)            | 基于langchain开发  |道法自然|
+| [谁是卧底增强版](./project/WhoIsTheSpyBaocaiLi/readme.md)            | 基于langgraph开发  |道法自然|
 | [个人助手](./project/PersonalMemoryAssistant/README.md)  | 基于langchain开发  |念安|
 | [哈尔滨冰雪大世界舆情分析](./project/HarbinIceSnowOpinionDecision/README.md)  | 基于langgraph开发  |tian09150714|
 
