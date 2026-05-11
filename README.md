@@ -64,11 +64,16 @@
 | 项目名称                                                 | 备注              | 作者    |
 | -------------------------------------------------------- | ----------------- | ------- |
 | [狼人杀（上帝视角）](./project/werewolfGameAi/README.md) | 基于langgraph开发 | 内测组  |
+| [剧本杀4人版](./project/ScriptedMurderGame/README.md) | 基于langgraph开发 | winnerFlyer  |
 | [智能知识库问答](./project/AgenticRag/README.md)         | 基于langchain开发 | jspi-fu |
 | [MCPChat](./project/MCPChat/README.md)                   | 基于langchain开发 | jspi-fu |
 | [数据处理智能体](./project/DataAgent/README.md)          | 基于langchain开发 | jspi-fu |
 | [医疗RAG诊断](./project/MedicalRag/README.md)            | 基于langchain开发  |道法自然|
+| [谁是卧底增强版](./project/WhoIsTheSpyBaocaiLi/readme.md)            | 基于langgraph开发  |道法自然|
 | [个人助手](./project/PersonalMemoryAssistant/README.md)  | 基于langchain开发  |念安|
+| [AI面试官](./project/RecruitingInterviewAgentDemo/Readme.md)  | 基于langgraph开发  |念安|
+| [客服工单智能处理](./project/TicketReviewAgentDemo/Readme.md)  | 基于langgraph开发  |念安|
+| [哈尔滨冰雪大世界舆情分析](./project/HarbinIceSnowOpinionDecision/README.md)  | 基于langgraph开发  |tian09150714|
 
 ## ✨核心贡献者
 - [牧小熊-项目负责人](https://github.com/muxiaoxiong)(Datawhale成员)
