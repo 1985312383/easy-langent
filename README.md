@@ -73,6 +73,7 @@
 | [个人助手](./project/PersonalMemoryAssistant/README.md)  | 基于langchain开发  |念安|
 | [AI面试官](./project/RecruitingInterviewAgentDemo/Readme.md)  | 基于langgraph开发  |念安|
 | [客服工单智能处理](./project/TicketReviewAgentDemo/Readme.md)  | 基于langgraph开发  |念安|
+| [辩论赛4人版](./project/DebateGame/README.md)  | 基于langgraph开发  |WangDF2022|
 | [哈尔滨冰雪大世界舆情分析](./project/HarbinIceSnowOpinionDecision/README.md)  | 基于langgraph开发  |tian09150714|
 
 ## ✨核心贡献者
