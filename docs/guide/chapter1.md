@@ -265,7 +265,7 @@ import openai
 import importlib
 from dotenv import load_dotenv
 load_dotenv()
-# 如按本文前面步骤操作，此时 `load_dotenv()` 函数返回 `False` 是正常的
+# 如按本文前面步骤操作，此时项目中不存在 .env 文件，`load_dotenv()` 函数返回 `False` 是正常的
 print("LangChain版本：", langchain.__version__)
 print("LangGraph版本：", importlib.metadata.version("langgraph"))
 print("OpenAI版本：", openai.__version__)
@@ -284,7 +284,15 @@ OpenAI版本： 2.31.0
 
 #### 1.3.2.3 步骤3：配置API密钥
 
-我们的案例需要调用大模型，可以通过官网购买deepseek、qwen或者chatgpt等模型服务提供商的服务以获取api key，也可以使用硅基流动的云端模型服务。**特别注意**，api key请妥善保存，最好不要泄露给别人。
+LangChain 的主要功能依赖大模型， 调用云端大模型则需要 API 密钥（相当于"通行证"）。
+
+为了安全，一般**不会把密钥直接写在代码里**，而是存放在独立的配置文件中，再通过代码读取，避免在分享代码时泄露密钥信息。
+
+**步骤3.1：获取API密钥**
+
+你需要在模型服务商官网注册账号并获取 API Key。
+
+下表列出了一些常见的服务商：
 
 | 服务商                 | 官网                                        |
 | ------------------- | ----------------------------------------- |
@@ -294,31 +302,74 @@ OpenAI版本： 2.31.0
 | **智谱 AI（GLM）**      | <https://bigmodel.cn/>                    |
 | **硅基流动**            | <https://cloud.siliconflow.cn/> |
 
-> 本教程选择的是deepseek官网的api，可以根据个人情况选择不同的底座模型
+> **说明：**
+> 1. 本教程使用 **DeepSeek 官方 API** 作为示例，你可以根据个人情况选择其他服务商。
+> 2. 案例代码基于 **OpenAI 兼容格式**调用模型。如果你选择的服务商同时提供与 OpenAI 或 Anthropic 兼容的多种 API 格式，
+> 请注意使用 **OpenAI 兼容**的接口。
+> 3. 注册后请前往对应服务商的官方文档，查看 API Key 和 BASE_URL 的获取方式。
 
-在项目文件夹（easy-langent）中新建一个文件，**命名为".env"**（注意前面有个点），或者直接复制根目录下的 `.env.example` 模板文件，然后修改文件名为 `.env`。
-> Tips: windows系统会存在隐藏扩展名的问题，新建`.env`时，需要点击【查看】->【显示】->勾选【文件扩展名】，才能看到隐藏扩展名。
+> ⚠️ **特别注意**：API Key 请妥善保存，切勿泄露给他人或上传到公开仓库，密钥被盗用可能导致严重的经济损失或隐私泄露。
 
-**步骤3.1：编辑.env文件**
+**步骤3.2：创建 .env 文件**
 
-用编辑器打开`.env文件`，写入以下内容（替换成你的API密钥）：
+在项目根目录（easy-langent 文件夹）中，新建一个名为 `.env` 的文件，或者直接复制根目录下的 `.env.example` 模板并重命名为 `.env`。
+
+> **Windows 用户注意**：系统可能隐藏文件扩展名，请先在文件资源管理器中点击【查看】→【显示】→ 勾选【文件扩展名】，
+> 确认文件名确实是 `.env`（没有额外后缀，比如 `.env.txt`）。
+
+用编辑器打开 `.env` 文件，填入你自己的 API Key 和服务商提供的 OpenAI 兼容 BASE_URL（如DeepSeek: https://api.deepseek.com）：
 
 ```env
 API_KEY="YOUR_API_KEY"
 BASE_URL="YOUR_BASE_URL"
 ```
 
-**步骤3.2：在Python代码中调用环境变量**
+**步骤3.3步：在代码中读取密钥**
 
 ```python
 from dotenv import load_dotenv
 import os
-load_dotenv()
+
+load_dotenv()  # 读取 .env 文件中的变量
 API_KEY = os.getenv("API_KEY")
-BASE_URL = os.getenv("BASE_URL")  # API地址，使用你的模型对应的地址（如DeepSeek: https://api.deepseek.com）
+BASE_URL = os.getenv("BASE_URL")
 ```
 
-> 在配置调用大模型服务时，通常需要输入 API Key、Token 或各类平台密码，为了安全起见一般是将这类密码配置到环境变量中，而不是直接写到代码中，密钥被恶意盗用，将会导致严重的经济损失或隐私泄露。
+**步骤3.4：验证配置是否成功**
+
+在终端运行以下代码，如果能正常输出模型回复，说明密钥配置成功：
+
+```python
+import os
+from dotenv import load_dotenv
+from langchain_openai import ChatOpenAI
+
+load_dotenv()
+
+API_KEY = os.getenv("API_KEY")
+BASE_URL = os.getenv("BASE_URL")
+
+if not API_KEY:
+    raise ValueError("未检测到 API_KEY，请检查 .env 文件是否配置正确")
+if not BASE_URL:
+    raise ValueError("未检测到 BASE_URL，请检查 .env 文件是否配置正确")
+
+llm = ChatOpenAI(
+    api_key=API_KEY,
+    base_url=BASE_URL,
+    model="deepseek-v4-flash",  # 注意填写服务商指定的模型名称（见下方说明）
+)
+
+response = llm.invoke("你好，请回复'配置成功'")
+print(response.content)
+```
+
+> 📌 **关于模型名称**：同一个模型在不同服务商的名称可能不同，请以服务商官方文档为准。
+> 例如 DeepSeek V4 Flash 模型，在 DeepSeek 官方的名称是 `deepseek-v4-flash`，而在硅基流动则是 `deepseek-ai/DeepSeek-V4-Flash`。
+
+如果看到模型正常回复，恭喜你，环境配置全部完成！
+
+> 如果报错，常见原因：① `.env` 文件不在项目根目录下；② API_KEY 填写有误或余额不足；③ BASE_URL 不匹配。
 
 ### 1.3.3 常见错误解决
 
@@ -349,12 +400,14 @@ BASE_URL = os.getenv("BASE_URL")
 
 if not API_KEY:
     raise ValueError("未检测到 API_KEY，请检查 .env 文件是否配置正确")
+if not BASE_URL:
+    raise ValueError("未检测到 BASE_URL，请检查 .env 文件是否配置正确")
 
 # 4. 初始化大模型
 llm = ChatOpenAI(
     api_key=API_KEY,
     base_url=BASE_URL,
-    model="deepseek-chat",  # 注意：根据你使用的模型修改名称！！！！ 后面章节不再继续说明
+    model="deepseek-v4-flash",  # 注意：根据你使用的模型修改名称！！！！ 后面章节不再继续说明
     temperature=0.3
 )
 
@@ -409,12 +462,14 @@ BASE_URL = os.getenv("BASE_URL")
 
 if not API_KEY:
     raise ValueError("未检测到 API_KEY，请检查 .env 文件是否配置正确")
+if not BASE_URL:
+    raise ValueError("未检测到 BASE_URL，请检查 .env 文件是否配置正确")
 
 # 4. 初始化大模型（和LangChain案例一样）
 llm = ChatOpenAI(
     api_key=API_KEY,
     base_url=BASE_URL,
-    model="deepseek-chat", # 注意：根据你使用的模型修改名称！！！！ 后面章节不再继续说明
+    model="deepseek-v4-flash", # 注意：根据你使用的模型修改名称！！！！ 后面章节不再继续说明
     temperature=0.3
 )
 
